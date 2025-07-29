@@ -24,13 +24,18 @@ func NewRTUOverTCPClientHandler(address string) *RTUOverTCPClientHandler {
 	}
 }
 
+// TCPClient creates TCP client with default handler and given connect string.
+func RtuOverTcpClient(address string) Client {
+	handler := NewRTUOverTCPClientHandler(address)
+	return NewClient(handler)
+}
+
 // Implementa a camada de transporte TCP usando frames RTU
 type rtuTCPTransporter struct {
-	conn         net.Conn
-	Address      string
-	Timeout      time.Duration
-	lastActivity time.Time
-	mu           sync.Mutex
+	conn    net.Conn
+	Address string
+	Timeout time.Duration
+	mu      sync.Mutex
 }
 
 func (t *rtuTCPTransporter) connect() error {
@@ -86,4 +91,13 @@ func (t *rtuTCPTransporter) Send(aduRequest []byte) ([]byte, error) {
 	}
 
 	return buf[:n], nil
+}
+
+// closeLocked closes current connection. Caller must hold the mutex before calling this method.
+func (mb *rtuTCPTransporter) close() (err error) {
+	if mb.conn != nil {
+		err = mb.conn.Close()
+		mb.conn = nil
+	}
+	return
 }
