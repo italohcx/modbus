@@ -1,103 +1,86 @@
 package modbus
 
 import (
+	"fmt"
 	"io"
 	"net"
-	"sync"
 	"time"
 )
 
-// RTUOverTCPClientHandler envia frames RTU (com CRC) por uma conexão TCP.
+// RTUOverTCPClientHandler envia frames RTU (com CRC) via conexão TCP.
+// Ele implementa a interface ClientHandler.
 type RTUOverTCPClientHandler struct {
-	rtuPackager
-	rtuTCPTransporter
+	rtuPackager // embutido, adiciona Encode, Decode, Verify
+	Address     string
+	Timeout     time.Duration
+	SlaveId     byte
+	Conn        net.Conn
+	closed      bool
 }
 
-// Novo handler
+// Construtor
 func NewRTUOverTCPClientHandler(address string) *RTUOverTCPClientHandler {
 	return &RTUOverTCPClientHandler{
-		rtuPackager: rtuPackager{},
-		rtuTCPTransporter: rtuTCPTransporter{
-			Address: address,
-			Timeout: 2 * time.Second,
-		},
+		Address: address,
+		Timeout: 5 * time.Second, // default
 	}
 }
 
-// TCPClient creates TCP client with default handler and given connect string.
-func RtuOverTcpClient(address string) Client {
-	handler := NewRTUOverTCPClientHandler(address)
-	return NewClient(handler)
-}
-
-// Implementa a camada de transporte TCP usando frames RTU
-type rtuTCPTransporter struct {
-	conn    net.Conn
-	Address string
-	Timeout time.Duration
-	mu      sync.Mutex
-}
-
-func (t *rtuTCPTransporter) connect() error {
-	if t.conn != nil {
-		return nil
+// Connect conecta ao servidor TCP
+func (h *RTUOverTCPClientHandler) Connect() error {
+	if h.Conn != nil {
+		return nil // já conectado
 	}
-	conn, err := net.DialTimeout("tcp", t.Address, t.Timeout)
+	conn, err := net.DialTimeout("tcp", h.Address, h.Timeout)
 	if err != nil {
 		return err
 	}
-	t.conn = conn
+	h.Conn = conn
+	h.closed = false
 	return nil
 }
 
-func (t *rtuTCPTransporter) Send(aduRequest []byte) ([]byte, error) {
-	t.mu.Lock()
-	defer t.mu.Unlock()
+// Close fecha a conexão
+func (h *RTUOverTCPClientHandler) Close() error {
+	h.closed = true
+	if h.Conn != nil {
+		return h.Conn.Close()
+	}
+	return nil
+}
 
-	if err := t.connect(); err != nil {
-		return nil, err
+// Encode envia o frame com CRC já incluso
+func (h *RTUOverTCPClientHandler) Send(request []byte) ([]byte, error) {
+	if h.closed || h.Conn == nil {
+		return nil, fmt.Errorf("connection is closed")
 	}
 
-	_, err := t.conn.Write(aduRequest)
+	if h.Timeout > 0 {
+		h.Conn.SetDeadline(time.Now().Add(h.Timeout))
+	}
+
+	// Escreve a requisição
+	_, err := h.Conn.Write(request)
 	if err != nil {
 		return nil, err
 	}
 
-	// Recebe a resposta
-	var buf [rtuMaxSize]byte
-	t.conn.SetReadDeadline(time.Now().Add(t.Timeout))
-
-	n, err := io.ReadAtLeast(t.conn, buf[:], rtuMinSize)
-	if err != nil {
+	// Lê a resposta (tamanho máximo de um frame RTU típico)
+	buf := make([]byte, 256)
+	n, err := h.Conn.Read(buf)
+	if err != nil && err != io.EOF {
 		return nil, err
-	}
-
-	function := aduRequest[1]
-	functionFail := aduRequest[1] | 0x80
-	bytesToRead := calculateResponseLength(aduRequest)
-
-	if buf[1] == function && n < bytesToRead {
-		n1, err := io.ReadFull(t.conn, buf[n:bytesToRead])
-		n += n1
-		if err != nil {
-			return nil, err
-		}
-	} else if buf[1] == functionFail && n < rtuExceptionSize {
-		n1, err := io.ReadFull(t.conn, buf[n:rtuExceptionSize])
-		n += n1
-		if err != nil {
-			return nil, err
-		}
 	}
 
 	return buf[:n], nil
 }
 
-// closeLocked closes current connection. Caller must hold the mutex before calling this method.
-func (mb *rtuTCPTransporter) close() (err error) {
-	if mb.conn != nil {
-		err = mb.conn.Close()
-		mb.conn = nil
-	}
-	return
+// SlaveId retorna o ID do escravo
+func (h *RTUOverTCPClientHandler) GetSlave() byte {
+	return h.SlaveId
+}
+
+// SetSlave define o ID do escravo
+func (h *RTUOverTCPClientHandler) SetSlave(id byte) {
+	h.SlaveId = id
 }
