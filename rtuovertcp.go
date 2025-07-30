@@ -1,8 +1,6 @@
 package modbus
 
 import (
-	"fmt"
-	"io"
 	"net"
 	"time"
 )
@@ -20,10 +18,12 @@ type RTUOverTCPClientHandler struct {
 
 // Construtor
 func NewRTUOverTCPClientHandler(address string) *RTUOverTCPClientHandler {
-	return &RTUOverTCPClientHandler{
+	h := &RTUOverTCPClientHandler{
 		Address: address,
-		Timeout: 5 * time.Second, // default
+		Timeout: 5 * time.Second,
 	}
+	h.rtuPackager.SlaveId = h.SlaveId
+	return h
 }
 
 // Connect conecta ao servidor TCP
@@ -50,37 +50,39 @@ func (h *RTUOverTCPClientHandler) Close() error {
 }
 
 // Encode envia o frame com CRC já incluso
-func (h *RTUOverTCPClientHandler) Send(request []byte) ([]byte, error) {
-	if h.closed || h.Conn == nil {
-		return nil, fmt.Errorf("connection is closed")
-	}
-
-	if h.Timeout > 0 {
-		h.Conn.SetDeadline(time.Now().Add(h.Timeout))
-	}
-
-	// Escreve a requisição
-	_, err := h.Conn.Write(request)
+func (h *RTUOverTCPClientHandler) Send(pduRequest []byte) ([]byte, error) {
+	// monta o frame com CRC
+	aduRequest, err := h.rtuPackager.Encode(&ProtocolDataUnit{
+		FunctionCode: pduRequest[0],
+		Data:         pduRequest[1:],
+	})
 	if err != nil {
 		return nil, err
 	}
 
-	// Lê a resposta (tamanho máximo de um frame RTU típico)
-	buf := make([]byte, 256)
-	n, err := h.Conn.Read(buf)
-	if err != nil && err != io.EOF {
+	// envia pela conexão TCP
+	if h.Timeout != 0 {
+		h.Conn.SetDeadline(time.Now().Add(h.Timeout))
+	}
+	_, err = h.Conn.Write(aduRequest)
+	if err != nil {
 		return nil, err
 	}
 
-	return buf[:n], nil
-}
+	// lê resposta
+	buf := make([]byte, 256)
+	n, err := h.Conn.Read(buf)
+	if err != nil {
+		return nil, err
+	}
 
-// SlaveId retorna o ID do escravo
-func (h *RTUOverTCPClientHandler) GetSlave() byte {
-	return h.SlaveId
-}
+	aduResponse := buf[:n]
 
-// SetSlave define o ID do escravo
-func (h *RTUOverTCPClientHandler) SetSlave(id byte) {
-	h.SlaveId = id
+	// decodifica e valida CRC
+	pduResponse, err := h.rtuPackager.Decode(aduResponse)
+	if err != nil {
+		return nil, err
+	}
+
+	return pduResponse.Data, nil
 }
